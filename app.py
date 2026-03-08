@@ -216,42 +216,51 @@ Include 4-8 items per dynamic array. For employee_count use exactly one of: "<50
 def analyse_company(org_name: str, website: str, api_key: str) -> dict:
     genai.configure(api_key=api_key)
 
-    # Use Gemini 2.0 Flash with Google Search grounding
-    model = genai.GenerativeModel(model_name="gemini-2.0-flash")
-
-    # Build tools list with google search
-    try:
-        from google.generativeai.types import Tool
-        google_search_tool = Tool(google_search={})
-        tools = [google_search_tool]
-    except Exception:
-        tools = None
-
     prompt_text = PROMPT.format(
         org_name=org_name,
-        website=website if website.strip() else "not provided — use your knowledge",
+        website=website.strip() if website.strip() else "not provided — use your knowledge",
     )
 
-    try:
-        if tools:
-            response = model.generate_content(prompt_text, tools=tools)
-        else:
-            response = model.generate_content(prompt_text)
-    except Exception:
-        # Fallback: try without tools
-        response = model.generate_content(prompt_text)
+    # Model fallback chain — try each until one works
+    # gemini-1.5-flash has the best free-tier quota (15 RPM, 1M TPM)
+    models_to_try = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-1.5-pro",
+        "gemini-2.0-flash",
+    ]
 
-    text = response.text.strip()
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name=model_name)
+            response = model.generate_content(
+                prompt_text,
+                generation_config={"temperature": 0.3, "max_output_tokens": 4096},
+            )
+            text = response.text.strip()
 
-    # Strip markdown fences if present
-    text = re.sub(r"^```(?:json)?", "", text).strip()
-    text = re.sub(r"```$", "", text).strip()
+            # Strip markdown fences if present
+            text = re.sub(r"^```(?:json)?", "", text).strip()
+            text = re.sub(r"```$",           "", text).strip()
 
-    # Extract JSON object
-    match = re.search(r"\{[\s\S]*\}", text)
-    if match:
-        return json.loads(match.group(0))
-    raise ValueError("Could not parse AI response. Please try again.")
+            # Extract JSON object
+            match = re.search(r"\{[\s\S]*\}", text)
+            if match:
+                return json.loads(match.group(0))
+        except Exception as e:
+            last_error = e
+            # If quota error, try next model; otherwise re-raise
+            err_str = str(e).lower()
+            if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate"]):
+                continue
+            raise e
+
+    # All models exhausted
+    raise ValueError(
+        f"All Gemini models hit quota limits. Please wait a minute and try again.\n\n"
+        f"Tip: The free tier allows ~15 requests/minute. Last error: {last_error}"
+    )
 
 
 # ─── Word Document Export ─────────────────────────────────────────────────────
